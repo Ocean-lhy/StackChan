@@ -15,6 +15,8 @@
 #include <lvgl.h>
 #include <lvgl_theme.h>
 #include <stackchan/stackchan.h>
+#include <stackchan/avatar/grokbot/grokbot_avatar.h>
+#include <assets.h>
 #include <assets/lang_config.h>
 #include <hal/hal.h>
 
@@ -131,8 +133,8 @@ StackChanAvatarDisplay::StackChanAvatarDisplay(esp_lcd_panel_io_handle_t panel_i
         .io_handle      = panel_io_,
         .panel_handle   = panel_,
         .control_handle = nullptr,
-        .buffer_size    = static_cast<uint32_t>(width_ * 20),
-        .double_buffer  = false,
+        .buffer_size    = static_cast<uint32_t>(width_ * 40),
+        .double_buffer  = true,
         .trans_size     = 0,
         .hres           = static_cast<uint32_t>(width_),
         .vres           = static_cast<uint32_t>(height_),
@@ -251,26 +253,60 @@ void StackChanAvatarDisplay::SetupUI()
 
     ESP_LOGI(TAG, "Creating Stack-chan Avatar...");
 
-    auto avatar = std::make_unique<DefaultAvatar>();
-    avatar->init(lv_screen_active());
-    avatar->getPanel()->onClick().connect([]() {
-        static uint32_t last_toggle_tick = 0;
-        const uint32_t now               = GetHAL().millis();
-        if (last_toggle_tick != 0 && now - last_toggle_tick < 2000) {
-            return;
-        }
+    std::unique_ptr<avatar::Avatar> avatar;
+    lv_obj_t* click_panel = nullptr;
+    bool is_grokbot       = false;
+    int grokbot_clips     = 0;
+    int grokbot_fps       = 0;
 
-        if (hal_bridge::is_xiaozhi_ready()) {
-            last_toggle_tick = now;
-            hal_bridge::toggle_xiaozhi_chat_state();
+    void* atlas_data  = nullptr;
+    size_t atlas_size = 0;
+    if (Assets::GetInstance().GetAssetData("grokbot.atlas", atlas_data, atlas_size)) {
+        auto grokbot = std::make_unique<GrokBotAvatar>();
+        if (grokbot->init(lv_screen_active(), static_cast<const uint8_t*>(atlas_data), atlas_size, width_, height_)) {
+            click_panel   = grokbot->getPanel();
+            grokbot_clips = grokbot->clipCount();
+            grokbot_fps   = grokbot->fps();
+            avatar        = std::move(grokbot);
+            is_grokbot    = true;
+            ESP_LOGI(TAG, "Using GrokBot atlas avatar (%d clips @ %d fps)", grokbot_clips, grokbot_fps);
+        } else {
+            ESP_LOGE(TAG, "GrokBot atlas initialization failed, falling back to default avatar");
         }
-    });
+    } else {
+        ESP_LOGW(TAG, "grokbot.atlas not found in assets partition, using default avatar");
+    }
+
+    if (!avatar) {
+        auto default_avatar = std::make_unique<DefaultAvatar>();
+        default_avatar->init(lv_screen_active());
+        click_panel = default_avatar->getPanel()->get();
+        avatar      = std::move(default_avatar);
+    }
+
+    lv_obj_add_flag(click_panel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(
+        click_panel,
+        [](lv_event_t* event) {
+            static uint32_t last_toggle_tick = 0;
+            const uint32_t now               = GetHAL().millis();
+            if (last_toggle_tick != 0 && now - last_toggle_tick < 2000) {
+                return;
+            }
+            if (hal_bridge::is_xiaozhi_ready()) {
+                last_toggle_tick = now;
+                hal_bridge::toggle_xiaozhi_chat_state();
+            }
+        },
+        LV_EVENT_CLICKED, nullptr);
 
     stackchan.attachAvatar(std::move(avatar));
-    stackchan.addModifier(std::make_unique<BreathModifier>());
-    blink_modifier_id_ = stackchan.addModifier(std::make_unique<BlinkModifier>());
     stackchan.addModifier(std::make_unique<HeadPetModifier>());
-    stackchan.addModifier(std::make_unique<ImuEventModifier>());
+    if (!is_grokbot) {
+        stackchan.addModifier(std::make_unique<BreathModifier>());
+        blink_modifier_id_ = stackchan.addModifier(std::make_unique<BlinkModifier>());
+        stackchan.addModifier(std::make_unique<ImuEventModifier>());
+    }
 
     preview_image_ = lv_image_create(lv_screen_active());
     lv_obj_set_size(preview_image_, 320, 240);
@@ -371,7 +407,7 @@ void StackChanAvatarDisplay::SetEmotion(const char* emotion)
         avatar.setEmotion(Emotion::Neutral);
     }
 
-    // Resync blink modifier base eye weights
+    // Resync blink modifier base eye weights (default avatar only)
     auto blink_modifier = static_cast<BlinkModifier*>(stackchan.getModifier(blink_modifier_id_));
     if (blink_modifier) {
         blink_modifier->resyncEyeWeights();
@@ -487,15 +523,17 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         return;
     }
 
-    auto& avatar = stackchan.avatar();
-    auto& motion = stackchan.motion();
+    auto& avatar  = stackchan.avatar();
+    auto* grokbot = dynamic_cast<GrokBotAvatar*>(&avatar);
 
     DisplayLockGuard lock(this);
 
-    bool is_idle      = false;
-    bool is_listening = false;
+    bool is_idle = false;
 
     if (strcmp(status, Lang::Strings::LISTENING) == 0) {
+        if (grokbot != nullptr) {
+            grokbot->setListening();
+        }
         if (speaking_modifier_id_ >= 0) {
             // Start speaking
             stackchan.removeModifier(speaking_modifier_id_);
@@ -509,6 +547,9 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
     } else if (strcmp(status, Lang::Strings::STANDBY) == 0) {
         _is_xiaozhi_ready = true;
 
+        if (grokbot != nullptr) {
+            grokbot->setIdle();
+        }
         if (speaking_modifier_id_ >= 0) {
             // Stop speaking
             stackchan.removeModifier(speaking_modifier_id_);
@@ -522,24 +563,55 @@ void StackChanAvatarDisplay::SetStatus(const char* status)
         GetHAL().refreshRgb();
 
     } else if (strcmp(status, Lang::Strings::SPEAKING) == 0) {
-        if (speaking_modifier_id_ < 0) {
+        if (grokbot != nullptr) {
+            grokbot->setSpeaking();
+        } else if (speaking_modifier_id_ < 0) {
             speaking_modifier_id_ = stackchan.addModifier(std::make_unique<SpeakingModifier>(0, 180, false));
         }
 
         GetHAL().setRgbColor(0, 0, 0, 50);
         GetHAL().refreshRgb();
     } else {
+        if (grokbot != nullptr) {
+            if (strcmp(status, Lang::Strings::CONNECTING) == 0 || strcmp(status, Lang::Strings::INITIALIZING) == 0 ||
+                strcmp(status, Lang::Strings::LOADING_PROTOCOL) == 0 ||
+                strcmp(status, Lang::Strings::CHECKING_NEW_VERSION) == 0 ||
+                strcmp(status, Lang::Strings::SCANNING_WIFI) == 0 || strcmp(status, Lang::Strings::UPGRADING) == 0 ||
+                strcmp(status, Lang::Strings::ACTIVATION) == 0 ||
+                strcmp(status, Lang::Strings::DETECTING_MODULE) == 0 ||
+                strcmp(status, Lang::Strings::LOADING_ASSETS) == 0 ||
+                strcmp(status, Lang::Strings::REGISTERING_NETWORK) == 0 ||
+                strcmp(status, Lang::Strings::SWITCH_TO_4G_NETWORK) == 0 ||
+                strcmp(status, Lang::Strings::SWITCH_TO_WIFI_NETWORK) == 0 ||
+                strcmp(status, Lang::Strings::PLEASE_WAIT) == 0 ||
+                strcmp(status, Lang::Strings::ENTERING_WIFI_CONFIG_MODE) == 0 ||
+                strcmp(status, Lang::Strings::SERVER_NOT_FOUND) == 0) {
+                grokbot->setLoading();
+            } else if (strcmp(status, Lang::Strings::CONNECTION_SUCCESSFUL) == 0) {
+                grokbot->setCelebrating();
+            } else if (strcmp(status, Lang::Strings::UPGRADE_FAILED) == 0 ||
+                       strcmp(status, Lang::Strings::SERVER_ERROR) == 0 ||
+                       strcmp(status, Lang::Strings::SERVER_NOT_CONNECTED) == 0 ||
+                       strcmp(status, Lang::Strings::SERVER_TIMEOUT) == 0 ||
+                       strcmp(status, Lang::Strings::MODEM_INIT_ERROR) == 0 ||
+                       strcmp(status, Lang::Strings::REG_ERROR) == 0 ||
+                       strcmp(status, Lang::Strings::DOWNLOAD_ASSETS_FAILED) == 0) {
+                grokbot->setError();
+            }
+        }
         avatar.setSpeech(status);
     }
 
     if (is_idle) {
         // Start idle motion
         ESP_LOGW(TAG, "Start idle motion");
-        if (idle_motion_modifier_id_ < 0) {
+        if (idle_motion_modifier_id_ < 0 && idle_expression_modifier_id_ < 0) {
             if (idle_motion_level_ > 0) {
                 CreateIdleMotionModifier();
             }
-            idle_expression_modifier_id_ = stackchan.addModifier(std::make_unique<IdleExpressionModifier>());
+            if (grokbot == nullptr) {
+                idle_expression_modifier_id_ = stackchan.addModifier(std::make_unique<IdleExpressionModifier>());
+            }
         }
 
         _is_xiaozhi_idle = true;

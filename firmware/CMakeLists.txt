@@ -21,3 +21,10 @@ endif()
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(stack-chan)
+
+# esp-dsp 1.7.0 relies on a transitive <cmath> include that GCC 14 no longer
+# provides. Keep the workaround scoped to that managed component.
+if(TARGET __idf_espressif__esp-dsp)
+    target_compile_options(__idf_espressif__esp-dsp PRIVATE
+        "$<$<COMPILE_LANGUAGE:CXX>:SHELL:-include cmath>")
+endif()

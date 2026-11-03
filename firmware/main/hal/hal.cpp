@@ -147,15 +147,13 @@ static void _stackchan_update_task(void* param)
     bool is_setup_done = false;
 
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(20));
+        // The 100 Hz FreeRTOS tick rounds this request to 30 ms. GrokBotAvatar
+        // fills the remaining ~3 ms by pacing itself at 30 FPS.
+        vTaskDelay(pdMS_TO_TICKS(29));
 
         tools::update_reminders();
 
         LvglLockGuard lock;
-
-        if (!hal_bridge::is_xiaozhi_idle()) {
-            vTaskDelay(pdMS_TO_TICKS(100));
-        }
 
         GetStackChan().update();
 
@@ -197,7 +195,7 @@ void Hal::startXiaozhi()
     });
 
     // Start stackchan update task
-    xTaskCreatePinnedToCore(_stackchan_update_task, "stackchan", 4096, NULL, 3, NULL, 1);
+    xTaskCreatePinnedToCore(_stackchan_update_task, "stackchan", 12288, NULL, 3, NULL, 1);
 
     hal_bridge::start_xiaozhi_app();
 }

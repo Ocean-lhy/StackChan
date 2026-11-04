@@ -125,6 +125,7 @@ private:
     bool emotion_override_       = false;
     bool reverse_                = false;
     bool rebuild_pending_        = true;
+    int playback_fps_            = 30;
     int64_t next_frame_us_       = 0;
     int64_t next_log_us_         = 0;
     uint32_t frames_since_log_   = 0;

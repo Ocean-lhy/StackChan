@@ -46,11 +46,12 @@ constexpr size_t count_of(const char* const (&)[N])
 
 void* alloc_frame_buffer(size_t size)
 {
-    // These buffers are touched every frame. Prefer internal RAM to avoid
-    // competing with the audio pipeline for PSRAM bandwidth.
-    void* ptr = heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    // Wi-Fi, audio and LVGL draw buffers require scarce internal RAM. Keep the
+    // animation working buffers in PSRAM and fall back to internal RAM only if
+    // PSRAM allocation fails.
+    void* ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (ptr == nullptr) {
-        ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        ptr = heap_caps_malloc(size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     }
     return ptr;
 }
@@ -139,6 +140,7 @@ bool GrokBotAvatar::init(lv_obj_t* parent, const uint8_t* atlas, size_t atlas_si
     mode_             = Mode::Idle;
     _emotion          = Emotion::Neutral;
     emotion_override_ = false;
+    playback_fps_     = player_.fps();
     ready_            = true;
     if (!select_clip("idle")) {
         choose_clip_for_mode();
@@ -215,7 +217,7 @@ void GrokBotAvatar::update()
         decode_us_since_log_ += esp_timer_get_time() - decode_start;
     }
 
-    const int64_t frame_us = 1000000LL / player_.fps();
+    const int64_t frame_us = 1000000LL / playback_fps_;
     next_frame_us_ += frame_us;
     if (next_frame_us_ < now - frame_us) {
         next_frame_us_ = now + frame_us;
@@ -233,11 +235,15 @@ void GrokBotAvatar::setMode(Mode mode)
     }
     mode_             = mode;
     emotion_override_ = false;
+    // Preserve voice continuity by reducing LCD traffic while the assistant is
+    // actively listening or speaking. Idle and non-voice modes stay at 30 FPS.
+    playback_fps_ = (mode_ == Mode::Listening || mode_ == Mode::Speaking) ? 24 : player_.fps();
+    next_frame_us_ = esp_timer_get_time();
     if (mode_ == Mode::Idle) {
         _emotion = Emotion::Neutral;
     }
     choose_clip_for_mode();
-    ESP_LOGI(TAG, "mode -> %d, clip=%s", static_cast<int>(mode_), currentClipName());
+    ESP_LOGI(TAG, "mode -> %d, clip=%s, target=%d fps", static_cast<int>(mode_), currentClipName(), playback_fps_);
 }
 
 void GrokBotAvatar::setEmotion(const Emotion& emotion)

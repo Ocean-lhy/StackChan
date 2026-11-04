@@ -9,8 +9,9 @@ The factory firmware now uses the GrokBot expression atlas for the main AI avata
 - LVGL renders the packed I4 image directly with a palette; frames are not
   expanded to a full RGB565 copy.
 - The image is invalidated as a full frame to prevent residual pixels when a
-  large expression shrinks. The LCD path uses double buffering so rendering and
-  SPI transfer can overlap.
+  large expression shrinks. The LCD path uses a 20-line double buffer so
+  rendering and SPI transfer can overlap; animation buffers stay in PSRAM so
+  Wi-Fi and audio retain enough internal RAM.
 - Playback uses exact reverse playback for smooth ping-pong loops.
 - AI emotions and assistant states map to matching expression groups.
 - Idle mode randomly rotates through calm, active, reactive and rare brand states.
@@ -90,11 +91,12 @@ existing Playwright installation via
 `build/stackchan-grokbot-full.bin` is the merged 16 MB factory image.
 
 - Size: `16,450,520` bytes
-- SHA256: `508C2218E6AD563889522FD7BACC14880FD7E5CBBC8589F3A5CAA7B480AE8ADE`
+- SHA256: `4F0C2BB94FE8DB15627A85B79FBCDB6240D94895FD5A266C9DA40339CF0F24AC`
 - Hardware verification: M5Stack StackChan, ESP32-S3 v0.2, 16 MB Flash
 - Runtime verification: 53 clips loaded, audio and camera initialized, no crash.
-  Idle playback targets 30 FPS; voice modes use the same animation bank but keep
-  the audio decoder above display priority and retain a 240 ms playback buffer.
+  Idle playback targets 30 FPS. Listening/speaking use 24 FPS for smoother
+  expressions, with the Opus decoder above display priority and a 360 ms playback
+  queue. After an underrun, audio output prebuffers about 180 ms before resuming.
 
 Flash the merged image at offset `0x0`:
 
